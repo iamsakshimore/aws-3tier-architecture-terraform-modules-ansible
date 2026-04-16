@@ -1,0 +1,168 @@
+---
+- name: Configure Web Tier (NGINX reverse proxy + form)
+  hosts: web
+  become: true
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Update yum repo
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install NGINX and PHP
+      yum:
+        name:
+          - nginx
+          - php
+          - php-fpm
+        state: present
+
+    - name: Remove default nginx configs (WEB)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/conf.d/default.conf
+        - /etc/nginx/conf.d/example_ssl.conf
+      ignore_errors: true
+
+    - name: Copy form.html to web root
+      template:
+        src: templates/form.html.j2
+        dest: /var/www/html/index.html
+        owner: nginx
+        group: nginx
+        mode: '0644'
+
+    - name: Configure NGINX reverse proxy (WEB)
+      copy:
+        dest: /etc/nginx/conf.d/default.conf
+        content: |
+          server {
+              listen 80;
+              root /var/www/html;
+              index index.html;
+              server_name _;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              location /submit.php {
+                  proxy_pass http://10.10.2.227;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Validate nginx config (WEB)
+      command: nginx -t
+
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+
+# ================= APP TIER =================
+
+- name: Configure App Tier (NGINX + PHP backend + RDS)
+  hosts: app
+  become: true
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Update yum repo
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install NGINX, PHP, MySQL client
+      yum:
+        name:
+          - nginx
+          - php
+          - php-fpm
+          - php-mysqlnd
+          - mariadb105
+        state: present
+
+    - name: Remove default nginx configs (APP)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/conf.d/default.conf
+        - /etc/nginx/conf.d/example_ssl.conf
+      ignore_errors: true
+
+    - name: Deploy submit.php
+      template:
+        src: templates/submit.php.j2
+        dest: /var/www/html/submit.php
+        owner: nginx
+        group: nginx
+        mode: '0644'
+
+    - name: Configure NGINX for PHP (APP)
+      copy:
+        dest: /etc/nginx/conf.d/default.conf
+        content: |
+          server {
+              listen 80;
+              root /var/www/html;
+              index index.php index.html;
+              server_name _;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              location ~ \.php$ {
+                  include fastcgi_params;
+                  fastcgi_pass unix:/run/php-fpm/www.sock;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              }
+          }
+
+    - name: Validate nginx config (APP)
+      command: nginx -t
+
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Restart php-fpm
+      service:
+        name: php-fpm
+        state: restarted
+
+    - name: Copy init.sql
+      copy:
+        src: files/init.sql
+        dest: /tmp/init.sql
+        mode: '0644'
+
+    - name: Initialize database
+      shell: |
+        mysql -h {{ db_endpoint }} -P {{ db_port }} -u {{ db_username }} -p{{ db_password }} {{ db_name }} < /tmp/init.sql
+      args:
+        executable: /bin/bash
+
+    - name: Verify users table
+      shell: |
+        mysql -h {{ db_endpoint }} -u {{ db_username }} -p{{ db_password }} -D {{ db_name }} -e "SHOW TABLES LIKE 'users';"
+      register: table_check
+      args:
+        executable: /bin/bash
+
+    - name: Debug output
+      debug:
+        var: table_check.stdout

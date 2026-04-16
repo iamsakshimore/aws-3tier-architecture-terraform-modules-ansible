@@ -1,0 +1,5 @@
+db_endpoint: terraform-20260415042354117600000005.cwxw6iwccu5b.us-east-1.rds.amazonaws.com:3306
+db_port: 3306
+db_username: dbadmin
+db_password: pass1234
+db_name: appdb
